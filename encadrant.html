@@ -19,6 +19,24 @@
 <script>
 let me = null, L = null, tk = null, S = { tab: 'ev', sub: null, re: null, pick: null, ses: null };
 const app = $('#app');
+// Flèche de retour : chaque écran a sa place dans l'historique du navigateur.
+let pop = false;
+const snap = () => ({ tab: S.tab, sub: S.sub, re: S.re, ses: S.ses });
+function hist() {
+  const n = snap();
+  if (!history.state) history.replaceState(n, '');
+  else if (JSON.stringify(history.state) !== JSON.stringify(n)) history.pushState(n, '');
+}
+addEventListener('popstate', e => { if (me && e.state) { Object.assign(S, e.state); pop = true; main(); } });
+// Recherche (nom ou code) et filtre « à corriger seulement »
+function filtBind(v) {
+  const q = v.querySelector('#q'), c = v.querySelector('#fc');
+  const f = () => v.querySelectorAll('tr[data-s]').forEach(t => {
+    const m = !q.value.trim() || t.dataset.s.includes(q.value.trim().toLowerCase());
+    t.hidden = !(m && (!c.checked || t.dataset.c === '1'));
+  });
+  q.oninput = f; c.onchange = f;
+}
 const stat = x => !x.tentative_id ? 'Absent' : x.statut === 'en_cours' ? 'En cours' : (x.mention || 'À corriger');
 const cell = x => !x.tentative_id ? '<span class="mut">Absent</span>' : x.statut === 'en_cours' ? '<span class="chip">En cours</span>'
   : x.mention ? badge(x.mention) : '<span class="chip warn">À corriger</span>';
@@ -63,6 +81,7 @@ function nav() {
   <span class="mut">${esc(me.prenom + ' ' + me.nom)} <span class="chip">${me.role}</span></span><button class="btn sec sm" id="lo">Déconnexion</button></nav>`;
 }
 async function main() {
+  if (pop) pop = false; else hist();
   app.innerHTML = nav() + '<section class="wide" id="v"><p class="mut">Chargement…</p></section>';
   app.querySelectorAll('[data-t]').forEach(b => b.onclick = () => { S.tab = b.dataset.t; S.sub = null; main(); });
   $('#lo').onclick = async () => { await sb.auth.signOut(); me = null; L = null; S.ses = null; auth('login'); };
@@ -127,9 +146,10 @@ async function vCorr(v) {
   const id = S.sub.id, r = await rpc('eval_enc_copies', { p_eval: id });
   if (!r.ok) return v.innerHTML = '<p class="err">Impossible de charger.</p>';
   v.innerHTML = `<div class="row"><h1>${esc(r.evaluation.titre)}</h1><button class="btn sec sm" id="bk">Retour</button></div>
-  <div class="card scroll"><table><tr><th>Affermi</th><th>Statut</th><th></th></tr>${sortP(r.affermis).map(x => `<tr><td>${esc(full(x))}</td><td>${cell(x)}</td>
+  <div class="acts"><input id="q" placeholder="Rechercher un nom ou un code" style="max-width:320px;margin:0"><label class="chk" style="margin:0"><input type="checkbox" id="fc"> À corriger seulement</label></div><div class="card scroll"><table><tr><th>Affermi</th><th>Statut</th><th></th></tr>${sortP(r.affermis).map(x => `<tr data-s="${esc((full(x) + ' ' + x.code).toLowerCase())}" data-c="${x.statut === 'termine' && !x.mention ? 1 : 0}"><td>${esc(full(x))}</td><td>${cell(x)}</td>
   <td>${x.statut === 'termine' ? `<button class="btn sec sm" data-p="${x.participant_id}" data-n="${esc(full(x))}">Ouvrir</button>` : ''}</td></tr>`).join('')}</table></div>`;
   $('#bk').onclick = () => { S.sub = null; main(); };
+  filtBind(v);
   v.querySelectorAll('[data-p]').forEach(b => b.onclick = () => { S.sub = { t: 'copy', id, pid: b.dataset.p, nom: b.dataset.n, ro: !r.evaluation.modifiable }; main(); });
 }
 async function vCopy(v) {
@@ -182,8 +202,8 @@ async function vRe(v) {
   v.innerHTML = `<h1>Résultats</h1>${await sesSel()}<label>Évaluation<select id="rs">${ev.map(x => `<option value="${x.id}"${x.id === id ? ' selected' : ''}>${esc(x.titre)}</option>`).join('')}</select></label>
   <div class="row"><span class="chip ${e.publie ? 'actif' : ''}">${e.publie ? 'Résultats publiés' : 'Résultats non publiés'}</span>
   <div class="acts">${e.modifiable ? `<button class="btn sm" id="pb">${e.publie ? 'Retirer la publication' : 'Publier les résultats'}</button>` : ''}<button class="btn sec sm" id="xp">Télécharger en PDF</button><button class="btn sec sm" id="xx">Télécharger en Excel</button></div></div>
-  <div class="card scroll"><table><tr><th>Prénom</th><th>Nom</th><th>Postnom</th><th>Mention</th><th>Corrigé par</th><th>Code</th></tr>${sortP(r.affermis).map(x => `<tr><td>${esc(x.prenom)}</td><td>${esc(x.nom)}</td><td>${esc(x.postnom || '')}</td><td>${cell(x)}</td><td>${esc(x.corrige_par || '—')}</td><td>${esc(x.code)}</td></tr>`).join('')}</table></div>`;
-  sesBind(); $('#rs').onchange = x => { S.re = x.target.value; main(); };
+  <div class="acts"><input id="q" placeholder="Rechercher un nom ou un code" style="max-width:320px;margin:0"><label class="chk" style="margin:0"><input type="checkbox" id="fc"> À corriger seulement</label></div><div class="card scroll"><table><tr><th>Prénom</th><th>Nom</th><th>Postnom</th><th>Mention</th><th>Corrigé par</th><th>Code</th></tr>${sortP(r.affermis).map(x => `<tr data-s="${esc((full(x) + ' ' + x.code).toLowerCase())}" data-c="${x.statut === 'termine' && !x.mention ? 1 : 0}"><td>${esc(x.prenom)}</td><td>${esc(x.nom)}</td><td>${esc(x.postnom || '')}</td><td>${cell(x)}</td><td>${esc(x.corrige_par || '—')}</td><td>${esc(x.code)}</td></tr>`).join('')}</table></div>`;
+  sesBind(); filtBind(v); $('#rs').onchange = x => { S.re = x.target.value; main(); };
   if (e.modifiable) $('#pb').onclick = async () => { await rpc('eval_enc_publier', { p_id: id, p_publie: !e.publie }); L = null; toast(e.publie ? 'Publication retirée.' : 'Résultats publiés : les affermis voient leur mention.'); main(); };
   $('#xx').onclick = () => xl(e.titre, r.affermis); $('#xp').onclick = () => pdf(e.titre, r.affermis);
 }
