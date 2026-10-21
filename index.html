@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mes évaluations – La Maison de Miséricorde</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Literata:wght@500;700&family=Public+Sans:wght@400;600;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top"><b>La Maison de Miséricorde</b></header>
+<main id="app"></main>
+<div id="toast" role="status"></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="common.js"></script>
+<script>
+let code = null, data = null, ex = null, msg = '';
+const app = $('#app');
+const show = h => { app.innerHTML = h; scrollTo(0, 0); };
+
+function home() {
+  show(`<section class="card narrow"><h1>Mes évaluations</h1><p class="mut">Entrez le code que vous utilisez pour la présence.</p>
+  <label for="c">Votre code</label><input id="c" autocomplete="off" autocapitalize="characters"><button class="btn" id="go">Continuer</button>
+  <p class="err">${esc(msg)}</p></section>`);
+  $('#go').onclick = login;
+  $('#c').onkeydown = e => { if (e.key === 'Enter') login(); };
+}
+async function login() {
+  const c = $('#c').value.trim(); if (!c) return;
+  $('#go').disabled = true;
+  const r = await rpc('eval_aff_connexion', { p_code: c });
+  if (!r.ok) { msg = ERR[r.raison] || 'Erreur.'; return home(); }
+  code = c; msg = ''; data = r; list();
+}
+function list() {
+  const d = data;
+  show(`<section class="narrow"><div class="row"><h1>Bonjour ${esc(d.prenom)}</h1><button class="btn sec sm" id="out">Quitter</button></div>
+  <p class="mut">${esc(d.session || '')}</p>` +
+  (d.evaluations.length ? d.evaluations.map(e => {
+    let r;
+    if (e.etat !== 'aucune') r = e.publie
+      ? (e.mention ? `<div>${badge(e.mention)}${e.commentaire ? `<p class="cm">« ${esc(e.commentaire)} »</p>` : ''}</div>` : '<span class="mut">Pas de mention pour le moment.</span>')
+      : '<span class="mut">Terminé. Le résultat n’est pas encore publié.</span>';
+    else r = `<button class="btn" data-id="${e.id}">Commencer</button>`;
+    return `<article class="card"><h2>${esc(e.titre)}</h2>${meta(e.type, e.duree, e.nb_questions)}${r}</article>`;
+  }).join('') : '<p class="card mut">Aucune évaluation disponible pour le moment.</p>') +
+  `<button class="btn sec" id="rf">Actualiser</button></section>`);
+  $('#out').onclick = () => { code = null; home(); };
+  $('#rf').onclick = back;
+  app.querySelectorAll('[data-id]').forEach(b => b.onclick = () => warn(b.dataset.id));
+}
+async function back() {
+  const r = await rpc('eval_aff_connexion', { p_code: code });
+  if (r.ok) { data = r; list(); } else { msg = ERR[r.raison] || ''; home(); }
+}
+function warn(id) {
+  const e = data.evaluations.find(x => x.id === id);
+  show(`<section class="card narrow"><h1>${esc(e.titre)}</h1><ul class="rules">
+  <li>Durée : <b>${e.duree} minutes</b>. Le chronomètre démarre dès que vous commencez.</li>
+  <li><b>Une seule tentative.</b></li>
+  <li>Si vous quittez cette page, l’examen est <b>terminé</b>. Un seul retour rapide est toléré, avec un avertissement.</li>
+  <li>Vos réponses s’enregistrent automatiquement.</li></ul>
+  <label class="chk"><input type="checkbox" id="ok"> J’ai compris et je suis prêt(e)</label>
+  <button class="btn" id="go" disabled>Commencer l’examen</button><button class="btn sec" id="bk">Retour</button><p class="err" id="m"></p></section>`);
+  $('#ok').onchange = e => $('#go').disabled = !e.target.checked;
+  $('#bk').onclick = list;
+  $('#go').onclick = () => start(id);
+}
+async function start(id) {
+  $('#go').disabled = true;
+  const r = await rpc('eval_aff_commencer', { p_code: code, p_eval: id });
+  if (!r.ok) {
+    $('#m').textContent = ERR[r.raison] || 'Erreur.';
+    if (r.raison === 'deja_passe') setTimeout(back, 1500);
+    return;
+  }
+  const decalage = new Date(r.maintenant).getTime() - Date.now();   // horloge serveur - horloge appareil
+  ex = { id: r.tentative, fin: new Date(r.fin_limite).getTime() - decalage, rep: {}, qs: r.questions, used: false, done: false, dirty: false, cf: false };
+  exam(r.titre);
+}
+function exam(t) {
+  show(`<div class="bar"><b>${esc(t)}</b><span id="t" class="timer"></span></div><section class="narrow">
+  <p class="warnbar" id="w" hidden>Attention : si vous quittez encore la page, l’examen sera terminé immédiatement.</p>` +
+  ex.qs.map(q => `<article class="card"><label for="q${q.numero}">Question ${q.numero}. ${esc(q.enonce)}</label>
+  <textarea id="q${q.numero}" data-q="${q.id}" rows="5" placeholder="Écrivez votre réponse ici"></textarea></article>`).join('') +
+  `<p class="mut" id="sv">Enregistrement automatique actif.</p><button class="btn" id="sd">Envoyer mes réponses</button></section>`);
+  app.querySelectorAll('textarea').forEach(a => a.oninput = () => { ex.rep[a.dataset.q] = a.value; ex.dirty = true; });
+  $('#sd').onclick = e => {
+    if (!ex.cf) { ex.cf = true; e.target.textContent = 'Confirmer l’envoi (définitif)'; return; }
+    finish('envoi');
+  };
+  ex.tk = setInterval(tick, 500); ex.sv = setInterval(save, 10000); tick();
+}
+function tick() {
+  if (!ex || ex.done) return;
+  const l = Math.max(0, ex.fin - Date.now()), t = $('#t');
+  if (t) { t.textContent = Math.floor(l / 60000) + ':' + String(Math.floor(l / 1000) % 60).padStart(2, '0'); t.classList.toggle('low', l < 60000); }
+  if (l <= 0) finish('temps');
+}
+async function save() {
+  if (!ex || ex.done || !ex.dirty) return;
+  ex.dirty = false;
+  const r = await rpc('eval_aff_sauver', { p_code: code, p_tentative: ex.id, p_reponses: ex.rep });
+  const s = $('#sv');
+  if (r.ok && s) s.textContent = 'Enregistré à ' + new Date().toLocaleTimeString('fr-FR');
+  else if (r.raison === 'termine') finish('temps');
+  else if (!r.ok) ex.dirty = true;
+}
+async function finish(m) {
+  if (!ex || ex.done) return;
+  ex.done = true; clearInterval(ex.tk); clearInterval(ex.sv); clearTimeout(ex.lv);
+  app.querySelectorAll('textarea,button').forEach(x => x.disabled = true);
+  await rpc('eval_aff_terminer', { p_code: code, p_tentative: ex.id, p_motif: m, p_reponses: ex.rep });
+  const t = { envoi: 'Vos réponses ont bien été envoyées.', temps: 'Le temps est écoulé : vos réponses ont été envoyées automatiquement.', sortie: 'Vous avez quitté la page : l’examen est terminé et vos réponses enregistrées ont été envoyées.' }[m];
+  show(`<section class="card narrow"><h1>Examen terminé</h1><p>${t}</p><p class="mut">Votre mention sera visible après publication par les encadrants.</p><button class="btn" id="bk">Retour à mes évaluations</button></section>`);
+  $('#bk').onclick = back; ex = null;
+}
+// Sortie de page : un seul retour rapide (3 s) est toléré, avec avertissement ; sinon l'examen est terminé.
+document.addEventListener('visibilitychange', () => {
+  if (!ex || ex.done) return;
+  if (document.hidden) { if (ex.used) finish('sortie'); else ex.lv = setTimeout(() => finish('sortie'), 3000); }
+  else if (ex.lv) { clearTimeout(ex.lv); ex.lv = null; ex.used = true; const w = $('#w'); if (w) w.hidden = false; }
+});
+home();
+</script>
+</body>
+</html>

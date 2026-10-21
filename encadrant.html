@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Espace encadrant – La Maison de Miséricorde</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Literata:wght@500;700&family=Public+Sans:wght@400;600;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top"><b>La Maison de Miséricorde</b> : espace encadrant</header>
+<main id="app"></main>
+<div id="toast" role="status"></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
+<script src="common.js"></script>
+<script>
+let me = null, L = null, tk = null, S = { tab: 'ev', sub: null, re: null, pick: null, ses: null };
+const app = $('#app');
+const stat = x => !x.tentative_id ? 'Absent' : x.statut === 'en_cours' ? 'En cours' : (x.mention || 'À corriger');
+const cell = x => !x.tentative_id ? '<span class="mut">Absent</span>' : x.statut === 'en_cours' ? '<span class="chip">En cours</span>'
+  : x.mention ? badge(x.mention) : '<span class="chip warn">À corriger</span>';
+
+/* ---------- Connexion / inscription ---------- */
+function auth(m, msg = '') {
+  const seg = `<div class="seg"><button class="${m === 'login' ? 'on' : ''}" data-m="login">Connexion</button><button class="${m !== 'login' ? 'on' : ''}" data-m="code">Créer mon profil</button></div>`;
+  let b;
+  if (m === 'login') b = `<label>E-mail<input id="em" type="email" autocomplete="username"></label><label>Mot de passe<input id="pw" type="password" autocomplete="current-password"></label><button class="btn" id="ok">Se connecter</button>`;
+  else if (m === 'code') b = `<p class="mut">Étape 1 sur 2 : saisissez le code d’invitation donné par un responsable.</p><label>Code d’invitation<input id="inv" autocomplete="off"></label><button class="btn" id="ok">Continuer</button>`;
+  else b = `<p class="mut">Étape 2 sur 2 : créez votre profil.</p><label>Nom<input id="n"></label><label>Prénom<input id="p"></label><label>E-mail<input id="e" type="email"></label><label>Mot de passe (6 caractères minimum)<input id="w" type="password" autocomplete="new-password"></label><button class="btn" id="ok">Créer mon profil</button>`;
+  app.innerHTML = `<section class="card narrow"><h1>Espace encadrant</h1>${seg}${b}<p class="err">${esc(msg)}</p></section>`;
+  app.querySelectorAll('[data-m]').forEach(x => x.onclick = () => auth(x.dataset.m));
+  $('#ok').onclick = function () { this.disabled = true; ({ login: doLogin, code: doCode, form: doCreate }[m])(); };
+}
+async function doLogin() {
+  const { error } = await sb.auth.signInWithPassword({ email: $('#em').value.trim().toLowerCase(), password: $('#pw').value });
+  if (error) return auth('login', 'E-mail ou mot de passe incorrect.');
+  const r = await rpc('eval_moi');
+  if (!r.ok) { await sb.auth.signOut(); return auth('login', 'Ce compte n’a pas accès (profil absent ou retiré).'); }
+  me = r; main();
+}
+async function doCode() {
+  const r = await rpc('eval_verifier_invitation', { p_code: $('#inv').value });
+  if (!r.ok) return auth('code', r.raison === 'trop_d_essais' ? ERR.trop_d_essais : 'Code d’invitation incorrect.');
+  tk = r.ticket; auth('form');
+}
+async function doCreate() {
+  const v = id => $('#' + id).value.trim(), nom = v('n'), prenom = v('p'), email = v('e').toLowerCase(), pw = $('#w').value;
+  if (!nom || !prenom || !email.includes('@') || pw.length < 6) return auth('form', 'Remplissez tous les champs (mot de passe : 6 caractères minimum).');
+  const { error } = await sb.auth.signUp({ email, password: pw, options: { data: { nom, prenom, ticket: tk } } });
+  if (error) return auth('form', /registered/i.test(error.message) ? 'Cet e-mail a déjà un compte.' : 'Création impossible : ' + error.message);
+  const r = await rpc('eval_moi');
+  if (!r.ok) { await sb.auth.signOut(); return auth('code', 'Le profil n’a pas pu être créé. Recommencez avec le code d’invitation (et vérifiez que « Confirm email » est désactivé dans Supabase).'); }
+  me = r; main();
+}
+
+/* ---------- Structure ---------- */
+function nav() {
+  const t = [['ev', 'Évaluations'], ['re', 'Résultats']]; if (me.role === 'responsable') t.push(['eq', 'Équipe']);
+  return `<nav class="tabs">${t.map(x => `<button class="${S.tab === x[0] ? 'on' : ''}" data-t="${x[0]}">${x[1]}</button>`).join('')}<span class="sp"></span>
+  <span class="mut">${esc(me.prenom + ' ' + me.nom)} <span class="chip">${me.role}</span></span><button class="btn sec sm" id="lo">Déconnexion</button></nav>`;
+}
+async function main() {
+  app.innerHTML = nav() + '<section class="wide" id="v"><p class="mut">Chargement…</p></section>';
+  app.querySelectorAll('[data-t]').forEach(b => b.onclick = () => { S.tab = b.dataset.t; S.sub = null; main(); });
+  $('#lo').onclick = async () => { await sb.auth.signOut(); me = null; L = null; S.ses = null; auth('login'); };
+  const v = $('#v'), s = S.sub;
+  if (S.tab === 're') await vRe(v); else if (S.tab === 'eq') await vEq(v);
+  else if (!s) await vEv(v); else if (s.t === 'form') vForm(v); else if (s.t === 'corr') await vCorr(v); else await vCopy(v);
+}
+
+/* ---------- Sessions (active ou anciennes) ---------- */
+async function sesSel() {
+  const r = await rpc('eval_enc_sessions'); if (!r.ok) return '';
+  return `<label>Session<select id="ss">${r.sessions.map(s => `<option value="${s.id}" data-act="${s.active ? 1 : 0}"${(S.ses ? s.id === S.ses : s.active) ? ' selected' : ''}>${esc(s.nom)}${s.active ? ' (active)' : ''}</option>`).join('')}</select></label>`;
+}
+function sesBind() {
+  const s = $('#ss');
+  if (s) s.onchange = x => { const o = x.target.selectedOptions[0]; S.ses = o.dataset.act === '1' ? null : o.value; S.re = null; L = null; main(); };
+}
+
+/* ---------- Évaluations ---------- */
+async function vEv(v) {
+  const r = await rpc('eval_enc_liste', { p_session: S.ses }), act = r.ok && r.session_active;
+  if (!r.ok) return v.innerHTML = '<p class="err">Impossible de charger les évaluations.</p>';
+  L = r;
+  v.innerHTML = `<div class="row"><h1>Évaluations</h1>${act ? '<button class="btn" id="nw">Nouvelle évaluation</button>' : ''}</div>${await sesSel()}
+  <p class="mut">${act ? `Session active : <b>${esc(r.session || 'aucune')}</b>, suivie depuis le site de présence.` : `Session archivée : <b>${esc(r.session || '')}</b>. Consultation seulement.`}</p>` +
+  (r.evaluations.length ? r.evaluations.map(e => `<article class="card"><div class="row"><h2>${esc(e.titre)}</h2><span class="chip ${e.actif ? 'actif' : ''}">${e.actif ? 'Activé' : 'Désactivé'}</span></div>
+  ${meta(e.type, e.duree, e.questions.length)}<p class="mut">${e.copies} copie(s) reçue(s), ${e.a_corriger} à corriger.</p>
+  <div class="acts">${act ? `<button class="btn sm" data-a="tog" data-id="${e.id}">${e.actif ? 'Désactiver' : 'Activer'}</button>` : ''}<button class="btn sec sm" data-a="corr" data-id="${e.id}">${act ? 'Corriger' : 'Voir les copies'}</button>${act ? `<button class="btn sec sm" data-a="edit" data-id="${e.id}">Modifier</button>` : ''}</div></article>`).join('')
+  : '<p class="card mut">Aucune évaluation dans cette session.</p>');
+  sesBind(); if (act) $('#nw').onclick = () => { S.sub = { t: 'form', d: { titre: '', type: 'Examen', duree: 20, qs: [''] } }; main(); };
+  v.querySelectorAll('[data-a]').forEach(b => b.onclick = async () => {
+    const id = b.dataset.id, e = L.evaluations.find(x => x.id === id);
+    if (b.dataset.a === 'tog') { await rpc('eval_enc_activer', { p_id: id, p_actif: !e.actif }); toast(e.actif ? 'Évaluation désactivée.' : 'Évaluation activée : les affermis peuvent la passer.'); main(); }
+    else if (b.dataset.a === 'corr') { S.sub = { t: 'corr', id }; main(); }
+    else { S.sub = { t: 'form', d: { id, titre: e.titre, type: e.type, duree: e.duree, qs: [...e.questions], locked: e.copies > 0 } }; main(); }
+  });
+}
+function vForm(v) {
+  const d = S.sub.d, lk = !!d.locked;
+  v.innerHTML = `<h1>${d.id ? 'Modifier l’évaluation' : 'Nouvelle évaluation'}</h1><div class="card">
+  <label>Titre<input id="ft" value="${esc(d.titre)}" placeholder="Ex. Examen : les bases de la foi"></label>
+  <div class="two"><label>Type<select id="fy">${['Examen', 'Interro', 'Autre'].map(t => `<option${t === d.type ? ' selected' : ''}>${t}</option>`).join('')}</select></label>
+  <label>Durée (minutes)<input id="fd" type="number" min="1" value="${d.duree}"></label></div><h2>Questions</h2>
+  ${lk ? '<p class="mut">Des copies existent déjà : les questions ne peuvent plus être modifiées.</p>' : ''}
+  ${d.qs.map((q, i) => `<label>Question ${i + 1}<textarea class="fq" rows="2"${lk ? ' readonly' : ''}>${esc(q)}</textarea></label>`).join('')}
+  ${lk ? '' : '<div class="acts"><button class="btn sec sm" id="aq">Ajouter une question</button><button class="btn sec sm" id="dq">Supprimer la dernière</button></div>'}
+  <div class="acts"><button class="btn" id="sv">Enregistrer</button><button class="btn sec" id="cn">Annuler</button></div></div>`;
+  const sync = () => { d.titre = $('#ft').value; d.type = $('#fy').value; d.duree = +$('#fd').value; d.qs = [...v.querySelectorAll('.fq')].map(x => x.value); };
+  if (!lk) { $('#aq').onclick = () => { sync(); d.qs.push(''); vForm(v); }; $('#dq').onclick = () => { sync(); if (d.qs.length > 1) d.qs.pop(); vForm(v); }; }
+  $('#cn').onclick = () => { S.sub = null; main(); };
+  $('#sv').onclick = async () => {
+    sync(); const qs = d.qs.map(q => q.trim()).filter(Boolean);
+    if (!d.titre.trim() || !(d.duree > 0) || !qs.length) return toast('Il faut un titre, une durée et au moins une question.');
+    const r = await rpc('eval_enc_sauver_eval', { p_id: d.id || null, p_titre: d.titre, p_type: d.type, p_duree: d.duree, p_questions: qs });
+    if (!r.ok) return toast('Enregistrement impossible (' + (r.raison || 'erreur') + ').');
+    S.sub = null; toast('Évaluation enregistrée. Activez-la pour que les affermis puissent la passer.'); main();
+  };
+}
+
+/* ---------- Correction ---------- */
+async function vCorr(v) {
+  const id = S.sub.id, r = await rpc('eval_enc_copies', { p_eval: id });
+  if (!r.ok) return v.innerHTML = '<p class="err">Impossible de charger.</p>';
+  v.innerHTML = `<div class="row"><h1>${esc(r.evaluation.titre)}</h1><button class="btn sec sm" id="bk">Retour</button></div>
+  <div class="card scroll"><table><tr><th>Affermi</th><th>Statut</th><th></th></tr>${sortP(r.affermis).map(x => `<tr><td>${esc(full(x))}</td><td>${cell(x)}</td>
+  <td>${x.statut === 'termine' ? `<button class="btn sec sm" data-p="${x.participant_id}" data-n="${esc(full(x))}">Ouvrir</button>` : ''}</td></tr>`).join('')}</table></div>`;
+  $('#bk').onclick = () => { S.sub = null; main(); };
+  v.querySelectorAll('[data-p]').forEach(b => b.onclick = () => { S.sub = { t: 'copy', id, pid: b.dataset.p, nom: b.dataset.n, ro: !r.evaluation.modifiable }; main(); });
+}
+async function vCopy(v) {
+  const { id, pid, nom, ro } = S.sub, r = await rpc('eval_enc_copie', { p_eval: id, p_participant: pid });
+  if (!r.ok) return v.innerHTML = '<p class="err">Copie introuvable.</p>';
+  S.pick = r.mention;
+  const fin = { envoi: 'Envoyée par l’affermi.', temps: 'Terminée : temps écoulé.', sortie: 'Terminée : l’affermi a quitté la page.' }[r.motif] || '';
+  v.innerHTML = `<div class="row"><h1>${esc(nom)}</h1><button class="btn sec sm" id="bk">Retour</button></div><p class="mut">${fin}${ro ? ' Session archivée : lecture seule.' : ''}</p>
+  ${r.questions.map(q => `<article class="card"><p><b>Question ${q.numero}.</b> ${esc(q.enonce)}</p><p class="ans">${esc(q.reponse) || '<span class="mut">(pas de réponse)</span>'}</p></article>`).join('')}
+  <div class="card"><h2>Mention</h2><div class="acts">${MENT.map(m => `<button class="pick m-${MENT.indexOf(m)}${S.pick === m ? ' sel' : ''}" data-m="${m}">${m}</button>`).join('')}</div>
+  <label style="margin-top:14px">Commentaire (facultatif)<textarea id="cm" rows="2">${esc(r.commentaire || '')}</textarea></label>
+  <div class="acts"><button class="btn" id="vd">Valider la correction</button><button class="btn sec" id="rt">Autoriser une nouvelle tentative</button></div></div>`;
+  const back = () => { S.sub = { t: 'corr', id }; main(); };
+  $('#bk').onclick = back;
+  if (ro) v.querySelectorAll('.pick,#vd,#rt,#cm').forEach(x => x.disabled = true);
+  v.querySelectorAll('.pick').forEach(b => b.onclick = () => { S.pick = b.dataset.m; v.querySelectorAll('.pick').forEach(x => x.classList.toggle('sel', x === b)); });
+  $('#vd').onclick = async () => {
+    if (!S.pick) return toast('Choisissez une mention.');
+    const q = await rpc('eval_enc_corriger', { p_tentative: r.tentative, p_mention: S.pick, p_commentaire: $('#cm').value });
+    toast(q.ok ? 'Correction enregistrée.' : 'Échec de l’enregistrement.'); if (q.ok) back();
+  };
+  $('#rt').onclick = async () => {
+    if (!confirm('Autoriser une nouvelle tentative ? L’ancienne copie sera archivée.')) return;
+    const q = await rpc('eval_enc_nouvelle_tentative', { p_tentative: r.tentative });
+    toast(q.ok ? 'Nouvelle tentative autorisée.' : 'Échec.'); if (q.ok) back();
+  };
+}
+
+/* ---------- Résultats et exports ---------- */
+const fname = t => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\w-]+/g, '_');
+const rows = a => sortP(a).map(x => [x.prenom, x.nom, x.postnom || '', stat(x), x.corrige_par || '']);
+const HEAD = ['Prénom', 'Nom', 'Postnom', 'Mention', 'Corrigé par'];
+function xl(t, a) {
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([HEAD, ...rows(a)]), 'Résultats');
+  XLSX.writeFile(wb, fname(t) + '.xlsx');
+}
+function pdf(t, a) {
+  const d = new window.jspdf.jsPDF(); d.setFontSize(14); d.text(t, 14, 16);
+  d.autoTable({ startY: 24, head: [HEAD], body: rows(a) }); d.save(fname(t) + '.pdf');
+}
+async function vRe(v) {
+  if (!L) L = await rpc('eval_enc_liste', { p_session: S.ses });
+  const ev = (L && L.evaluations) || [];
+  if (!ev.length) { v.innerHTML = '<h1>Résultats</h1>' + await sesSel() + '<p class="card mut">Aucune évaluation dans cette session.</p>'; return sesBind(); }
+  const id = ev.some(e => e.id === S.re) ? S.re : ev[0].id; S.re = id;
+  const r = await rpc('eval_enc_copies', { p_eval: id });
+  if (!r.ok) return v.innerHTML = '<p class="err">Impossible de charger.</p>';
+  const e = r.evaluation;
+  v.innerHTML = `<h1>Résultats</h1>${await sesSel()}<label>Évaluation<select id="rs">${ev.map(x => `<option value="${x.id}"${x.id === id ? ' selected' : ''}>${esc(x.titre)}</option>`).join('')}</select></label>
+  <div class="row"><span class="chip ${e.publie ? 'actif' : ''}">${e.publie ? 'Résultats publiés' : 'Résultats non publiés'}</span>
+  <div class="acts">${e.modifiable ? `<button class="btn sm" id="pb">${e.publie ? 'Retirer la publication' : 'Publier les résultats'}</button>` : ''}<button class="btn sec sm" id="xp">Télécharger en PDF</button><button class="btn sec sm" id="xx">Télécharger en Excel</button></div></div>
+  <div class="card scroll"><table><tr><th>Prénom</th><th>Nom</th><th>Postnom</th><th>Mention</th><th>Corrigé par</th><th>Code</th></tr>${sortP(r.affermis).map(x => `<tr><td>${esc(x.prenom)}</td><td>${esc(x.nom)}</td><td>${esc(x.postnom || '')}</td><td>${cell(x)}</td><td>${esc(x.corrige_par || '—')}</td><td>${esc(x.code)}</td></tr>`).join('')}</table></div>`;
+  sesBind(); $('#rs').onchange = x => { S.re = x.target.value; main(); };
+  if (e.modifiable) $('#pb').onclick = async () => { await rpc('eval_enc_publier', { p_id: id, p_publie: !e.publie }); L = null; toast(e.publie ? 'Publication retirée.' : 'Résultats publiés : les affermis voient leur mention.'); main(); };
+  $('#xx').onclick = () => xl(e.titre, r.affermis); $('#xp').onclick = () => pdf(e.titre, r.affermis);
+}
+
+/* ---------- Équipe (responsables) ---------- */
+async function vEq(v) {
+  const r = await rpc('eval_resp_equipe');
+  if (!r.ok) return v.innerHTML = '<p class="err">Réservé aux responsables.</p>';
+  v.innerHTML = `<h1>Équipe</h1><div class="card"><h2>Code d’invitation</h2><p class="mut">À donner aux nouveaux encadrants pour qu’ils créent leur profil (6 caractères minimum).</p>
+  <div class="acts"><input id="ni" value="${esc(r.code_invitation || '')}" style="max-width:280px;margin:0"><button class="btn sm" id="ci">Changer le code</button></div></div>
+  <div class="card scroll"><table><tr><th>Nom</th><th>E-mail</th><th>Rôle</th><th></th></tr>${r.equipe.map(s => `<tr><td>${esc(s.prenom + ' ' + s.nom)}</td><td>${esc(s.email)}</td><td><span class="chip">${s.actif ? s.role : 'retiré'}</span></td>
+  <td>${s.id === me.id || !s.actif ? '' : `<button class="btn sec sm" data-r="${s.id}" data-v="${s.role === 'responsable' ? 'encadrant' : 'responsable'}">${s.role === 'responsable' ? 'Rendre encadrant' : 'Nommer responsable'}</button> <button class="btn sec sm" data-x="${s.id}">Retirer</button>`}</td></tr>`).join('')}</table></div>`;
+  $('#ci').onclick = async () => { const q = await rpc('eval_resp_code', { p_nouveau: $('#ni').value }); toast(q.ok ? 'Code d’invitation changé.' : 'Code refusé (6 caractères minimum).'); };
+  v.querySelectorAll('[data-r]').forEach(b => b.onclick = async () => { await rpc('eval_resp_role', { p_id: b.dataset.r, p_role: b.dataset.v }); main(); });
+  v.querySelectorAll('[data-x]').forEach(b => b.onclick = async () => { if (confirm('Retirer cet encadrant ?')) { await rpc('eval_resp_retirer', { p_id: b.dataset.x }); main(); } });
+}
+
+/* ---------- Démarrage ---------- */
+(async () => {
+  const { data: { session } } = await sb.auth.getSession();
+  if (session) { const r = await rpc('eval_moi'); if (r.ok) { me = r; return main(); } }
+  auth('login');
+})();
+</script>
+</body>
+</html>
