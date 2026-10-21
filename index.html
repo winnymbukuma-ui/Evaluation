@@ -18,7 +18,31 @@ let code = null, data = null, ex = null, msg = '';
 const app = $('#app');
 const show = h => { app.innerHTML = h; scrollTo(0, 0); };
 
-function home() {
+const hist = s => {
+  if (!history.state) history.replaceState(s, '');
+  else if (JSON.stringify(history.state) !== JSON.stringify(s)) history.pushState(s, '');
+};
+// Flèche de retour : on navigue entre les écrans ; pendant un examen, on demande confirmation.
+addEventListener('popstate', e => {
+  if (ex && !ex.done) { history.pushState({ v: 'exam' }, ''); if (confirm('Quitter l’examen ? Il sera terminé.')) finish('sortie'); return; }
+  const s = e.state || { v: 'home' };
+  if (!code || s.v === 'home') { code = null; home(true); }
+  else if (s.v === 'warn') warn(s.id, true); else list(true);
+});
+// Sauvegarde sur le téléphone : les réponses non envoyées partent dès que possible.
+const LS = 'eval_pending';
+const store = o => { try { localStorage.setItem(LS, JSON.stringify(o)); } catch (e) {} };
+const unstore = () => { try { localStorage.removeItem(LS); } catch (e) {} };
+async function flush(c) {
+  let p = null; try { p = JSON.parse(localStorage.getItem(LS)); } catch (e) {}
+  if (!p || String(p.code).toUpperCase() !== c.toUpperCase()) return false;
+  const r = await rpc('eval_aff_terminer', { p_code: c, p_tentative: p.id, p_motif: p.motif || 'sortie', p_reponses: p.rep || {} });
+  if (r.raison === 'erreur_reseau') return false;
+  unstore(); return true;
+}
+
+function home(p) {
+  if (!p) hist({ v: 'home' });
   show(`<section class="card narrow"><h1>Mes évaluations</h1><p class="mut">Entrez le code que vous utilisez pour la présence.</p>
   <label for="c">Votre code</label><input id="c" autocomplete="off" autocapitalize="characters"><button class="btn" id="go">Continuer</button>
   <p class="err">${esc(msg)}</p></section>`);
@@ -30,9 +54,12 @@ async function login() {
   $('#go').disabled = true;
   const r = await rpc('eval_aff_connexion', { p_code: c });
   if (!r.ok) { msg = ERR[r.raison] || 'Erreur.'; return home(); }
-  code = c; msg = ''; data = r; list();
+  code = c; msg = ''; data = r;
+  if (await flush(c)) { const r2 = await rpc('eval_aff_connexion', { p_code: c }); if (r2.ok) data = r2; }
+  list();
 }
-function list() {
+function list(p) {
+  if (!p) hist({ v: 'list' });
   const d = data;
   show(`<section class="narrow"><div class="row"><h1>Bonjour ${esc(d.prenom)}</h1><button class="btn sec sm" id="out">Quitter</button></div>
   <p class="mut">${esc(d.session || '')}</p>` +
@@ -53,7 +80,8 @@ async function back() {
   const r = await rpc('eval_aff_connexion', { p_code: code });
   if (r.ok) { data = r; list(); } else { msg = ERR[r.raison] || ''; home(); }
 }
-function warn(id) {
+function warn(id, p) {
+  if (!p) hist({ v: 'warn', id });
   const e = data.evaluations.find(x => x.id === id);
   show(`<section class="card narrow"><h1>${esc(e.titre)}</h1><ul class="rules">
   <li>Durée : <b>${e.duree} minutes</b>. Le chronomètre démarre dès que vous commencez.</li>
@@ -76,21 +104,37 @@ async function start(id) {
   }
   const decalage = new Date(r.maintenant).getTime() - Date.now();   // horloge serveur - horloge appareil
   ex = { id: r.tentative, fin: new Date(r.fin_limite).getTime() - decalage, rep: {}, qs: r.questions, used: false, done: false, dirty: false, cf: false };
+  store({ code, id: ex.id, rep: {}, motif: 'sortie' });
   exam(r.titre);
 }
 function exam(t) {
-  show(`<div class="bar"><b>${esc(t)}</b><span id="t" class="timer"></span></div><section class="narrow">
+  hist({ v: 'exam' });
+  show(`<div class="bar"><b>${esc(t)}</b><span><span id="net" class="chip actif">En ligne</span> <span id="t" class="timer"></span></span></div><section class="narrow">
   <p class="warnbar" id="w" hidden>Attention : si vous quittez encore la page, l’examen sera terminé immédiatement.</p>` +
   ex.qs.map(q => `<article class="card"><label for="q${q.numero}">Question ${q.numero}. ${esc(q.enonce)}</label>
   <textarea id="q${q.numero}" data-q="${q.id}" rows="5" placeholder="Écrivez votre réponse ici"></textarea></article>`).join('') +
-  `<p class="mut" id="sv">Enregistrement automatique actif.</p><button class="btn" id="sd">Envoyer mes réponses</button></section>`);
-  app.querySelectorAll('textarea').forEach(a => a.oninput = () => { ex.rep[a.dataset.q] = a.value; ex.dirty = true; });
+  `<p class="warnbar" id="rc" hidden></p><p class="mut" id="sv">Enregistrement automatique actif.</p><button class="btn" id="sd">Envoyer mes réponses</button></section>`);
+  app.querySelectorAll('textarea').forEach(a => a.oninput = () => { ex.rep[a.dataset.q] = a.value; ex.dirty = true; store({ code, id: ex.id, rep: ex.rep, motif: 'sortie' }); });
   $('#sd').onclick = e => {
-    if (!ex.cf) { ex.cf = true; e.target.textContent = 'Confirmer l’envoi (définitif)'; return; }
+    if (!ex.cf) { recap(e.target); return; }
     finish('envoi');
   };
-  ex.tk = setInterval(tick, 500); ex.sv = setInterval(save, 10000); tick();
+  ex.tk = setInterval(tick, 500); ex.sv = setInterval(save, 10000); tick(); net();
 }
+function recap(b) {
+  const vide = ex.qs.filter(q => !(ex.rep[q.id] || '').trim()), r = $('#rc');
+  r.textContent = `Vous avez répondu à ${ex.qs.length - vide.length} question(s) sur ${ex.qs.length}.` + (vide.length ? ` Sans réponse : ${vide.map(q => 'question ' + q.numero).join(', ')}.` : '');
+  r.hidden = false;
+  app.querySelectorAll('textarea').forEach(a => a.style.borderColor = (ex.rep[a.dataset.q] || '').trim() ? '' : 'var(--bad)');
+  ex.cf = true; b.textContent = 'Confirmer l’envoi (définitif)'; r.scrollIntoView({ block: 'center' });
+}
+function net() {
+  const n = $('#net'); if (!n) return;
+  n.textContent = navigator.onLine ? 'En ligne' : 'Hors ligne';
+  n.className = 'chip ' + (navigator.onLine ? 'actif' : 'warn');
+}
+addEventListener('online', () => { net(); save(); });
+addEventListener('offline', net);
 function tick() {
   if (!ex || ex.done) return;
   const l = Math.max(0, ex.fin - Date.now()), t = $('#t');
@@ -110,8 +154,18 @@ async function finish(m) {
   if (!ex || ex.done) return;
   ex.done = true; clearInterval(ex.tk); clearInterval(ex.sv); clearTimeout(ex.lv);
   app.querySelectorAll('textarea,button').forEach(x => x.disabled = true);
-  await rpc('eval_aff_terminer', { p_code: code, p_tentative: ex.id, p_motif: m, p_reponses: ex.rep });
+  const o = { code, id: ex.id, rep: ex.rep, motif: m };
+  store(o);
+  let r;
+  for (;;) {   // en cas de coupure, on réessaie tant que la connexion ne revient pas
+    r = await rpc('eval_aff_terminer', { p_code: code, p_tentative: o.id, p_motif: m, p_reponses: o.rep });
+    if (r.raison !== 'erreur_reseau') break;
+    const s = $('#sv'); if (s) s.textContent = 'Pas de connexion : vos réponses sont gardées sur votre téléphone et partiront dès que la connexion revient.';
+    await new Promise(res => setTimeout(res, 3000));
+  }
+  unstore();
   const t = { envoi: 'Vos réponses ont bien été envoyées.', temps: 'Le temps est écoulé : vos réponses ont été envoyées automatiquement.', sortie: 'Vous avez quitté la page : l’examen est terminé et vos réponses enregistrées ont été envoyées.' }[m];
+  hist({ v: 'end' });
   show(`<section class="card narrow"><h1>Examen terminé</h1><p>${t}</p><p class="mut">Votre mention sera visible après publication par les encadrants.</p><button class="btn" id="bk">Retour à mes évaluations</button></section>`);
   $('#bk').onclick = back; ex = null;
 }
@@ -121,7 +175,8 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) { if (ex.used) finish('sortie'); else ex.lv = setTimeout(() => finish('sortie'), 3000); }
   else if (ex.lv) { clearTimeout(ex.lv); ex.lv = null; ex.used = true; const w = $('#w'); if (w) w.hidden = false; }
 });
-home();
+history.replaceState({ v: 'home' }, '');
+home(true);
 </script>
 </body>
 </html>
