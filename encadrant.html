@@ -87,7 +87,7 @@ async function main() {
   $('#lo').onclick = async () => { await sb.auth.signOut(); me = null; L = null; S.ses = null; auth('login'); };
   const v = $('#v'), s = S.sub;
   if (S.tab === 're') await vRe(v); else if (S.tab === 'eq') await vEq(v);
-  else if (!s) await vEv(v); else if (s.t === 'form') vForm(v); else if (s.t === 'corr') await vCorr(v); else await vCopy(v);
+  else if (!s) await vEv(v); else if (s.t === 'form') vForm(v); else if (s.t === 'corr') await vCorr(v); else if (s.t === 'reopen') vReopen(v); else await vCopy(v);
 }
 
 /* ---------- Sessions (active ou anciennes) ---------- */
@@ -107,16 +107,16 @@ async function vEv(v) {
   L = r;
   v.innerHTML = `<div class="row"><h1>Évaluations</h1>${act ? '<button class="btn" id="nw">Nouvelle évaluation</button>' : ''}</div>${await sesSel()}
   <p class="mut">${act ? `Session active : <b>${esc(r.session || 'aucune')}</b>, suivie depuis le site de présence.` : `Session archivée : <b>${esc(r.session || '')}</b>. Consultation seulement.`}</p>` +
-  (r.evaluations.length ? r.evaluations.map(e => `<article class="card"><div class="row"><h2>${esc(e.titre)}</h2><span class="chip ${e.actif ? 'actif' : ''}">${e.actif ? 'Activé' : 'Désactivé'}</span></div>
-  ${meta(e.type, e.duree, e.questions.length)}<p class="mut">${e.copies} copie(s) reçue(s), ${e.a_corriger} à corriger.</p>
-  <div class="acts">${act ? `<button class="btn sm" data-a="tog" data-id="${e.id}">${e.actif ? 'Désactiver' : 'Activer'}</button>` : ''}<button class="btn sec sm" data-a="corr" data-id="${e.id}">${act ? 'Corriger' : 'Voir les copies'}</button>${act ? `<button class="btn sec sm" data-a="edit" data-id="${e.id}">Modifier</button>` : ''}</div></article>`).join('')
+  (r.evaluations.length ? r.evaluations.map(e => `<article class="card"><div class="row"><h2>${esc(e.titre)}</h2><span class="chip ${etat(e)[1]}">${etat(e)[0]}</span></div>
+  ${meta(e.type, e.duree, e.questions.length)}<p class="mut">${e.copies} copie(s) reçue(s), ${e.a_corriger} à corriger.${plan(e)}</p>
+  <div class="acts">${act ? `<button class="btn sm" data-a="tog" data-id="${e.id}">${closedD(e) ? 'Rouvrir' : e.actif ? 'Désactiver' : 'Activer'}</button>` : ''}<button class="btn sec sm" data-a="corr" data-id="${e.id}">${act ? 'Corriger' : 'Voir les copies'}</button>${act ? `<button class="btn sec sm" data-a="edit" data-id="${e.id}">Modifier</button>` : ''}</div></article>`).join('')
   : '<p class="card mut">Aucune évaluation dans cette session.</p>');
-  sesBind(); if (act) $('#nw').onclick = () => { S.sub = { t: 'form', d: { titre: '', type: 'Examen', duree: 20, qs: [''] } }; main(); };
+  sesBind(); if (act) $('#nw').onclick = () => { S.sub = { t: 'form', d: { titre: '', type: 'Examen', duree: 20, qs: [''], tent: 1, ouv: '', fer: '' } }; main(); };
   v.querySelectorAll('[data-a]').forEach(b => b.onclick = async () => {
     const id = b.dataset.id, e = L.evaluations.find(x => x.id === id);
-    if (b.dataset.a === 'tog') { await rpc('eval_enc_activer', { p_id: id, p_actif: !e.actif }); toast(e.actif ? 'Évaluation désactivée.' : 'Évaluation activée : les affermis peuvent la passer.'); main(); }
+    if (b.dataset.a === 'tog') { if (closedD(e) || (!e.actif && e.ferme_a && new Date(e.ferme_a) <= new Date())) { S.sub = { t: 'reopen', id }; return main(); } await rpc('eval_enc_activer', { p_id: id, p_actif: !e.actif }); toast(e.actif ? 'Évaluation désactivée.' : 'Évaluation activée : les affermis peuvent la passer.'); main(); }
     else if (b.dataset.a === 'corr') { S.sub = { t: 'corr', id }; main(); }
-    else { S.sub = { t: 'form', d: { id, titre: e.titre, type: e.type, duree: e.duree, qs: [...e.questions], locked: e.copies > 0 } }; main(); }
+    else { S.sub = { t: 'form', d: { id, titre: e.titre, type: e.type, duree: e.duree, qs: [...e.questions], locked: e.copies > 0, tent: e.tentatives_max, ouv: loc(e.ouvre_a), fer: loc(e.ferme_a) } }; main(); }
   });
 }
 function vForm(v) {
@@ -124,21 +124,43 @@ function vForm(v) {
   v.innerHTML = `<h1>${d.id ? 'Modifier l’évaluation' : 'Nouvelle évaluation'}</h1><div class="card">
   <label>Titre<input id="ft" value="${esc(d.titre)}" placeholder="Ex. Examen : les bases de la foi"></label>
   <div class="two"><label>Type<select id="fy">${['Examen', 'Interro', 'Autre'].map(t => `<option${t === d.type ? ' selected' : ''}>${t}</option>`).join('')}</select></label>
-  <label>Durée (minutes)<input id="fd" type="number" min="1" value="${d.duree}"></label></div><h2>Questions</h2>
+  <label>Durée (minutes)<input id="fd" type="number" min="1" value="${d.duree}"></label></div><div class="two"><label>Tentatives autorisées<input id="ft2" type="number" min="1" max="10" value="${d.tent}"></label><span></span></div><div class="two"><label>S’ouvre le (facultatif)<input id="fo" type="datetime-local" value="${d.ouv}"></label><label>Se ferme le (facultatif)<input id="ff" type="datetime-local" value="${d.fer}"></label></div><h2>Questions</h2>
   ${lk ? '<p class="mut">Des copies existent déjà : les questions ne peuvent plus être modifiées.</p>' : ''}
   ${d.qs.map((q, i) => `<label>Question ${i + 1}<textarea class="fq" rows="2"${lk ? ' readonly' : ''}>${esc(q)}</textarea></label>`).join('')}
   ${lk ? '' : '<div class="acts"><button class="btn sec sm" id="aq">Ajouter une question</button><button class="btn sec sm" id="dq">Supprimer la dernière</button></div>'}
   <div class="acts"><button class="btn" id="sv">Enregistrer</button><button class="btn sec" id="cn">Annuler</button></div></div>`;
-  const sync = () => { d.titre = $('#ft').value; d.type = $('#fy').value; d.duree = +$('#fd').value; d.qs = [...v.querySelectorAll('.fq')].map(x => x.value); };
+  const sync = () => { d.titre = $('#ft').value; d.type = $('#fy').value; d.duree = +$('#fd').value; d.tent = +$('#ft2').value; d.ouv = $('#fo').value; d.fer = $('#ff').value; d.qs = [...v.querySelectorAll('.fq')].map(x => x.value); };
   if (!lk) { $('#aq').onclick = () => { sync(); d.qs.push(''); vForm(v); }; $('#dq').onclick = () => { sync(); if (d.qs.length > 1) d.qs.pop(); vForm(v); }; }
   $('#cn').onclick = () => { S.sub = null; main(); };
   $('#sv').onclick = async () => {
     sync(); const qs = d.qs.map(q => q.trim()).filter(Boolean);
     if (!d.titre.trim() || !(d.duree > 0) || !qs.length) return toast('Il faut un titre, une durée et au moins une question.');
-    const r = await rpc('eval_enc_sauver_eval', { p_id: d.id || null, p_titre: d.titre, p_type: d.type, p_duree: d.duree, p_questions: qs });
+    if (d.ouv && d.fer && new Date(d.fer) <= new Date(d.ouv)) return toast('La fermeture doit être après l’ouverture.');
+    const r = await rpc('eval_enc_sauver_eval', { p_id: d.id || null, p_titre: d.titre, p_type: d.type, p_duree: d.duree, p_questions: qs, p_ouvre: d.ouv ? new Date(d.ouv).toISOString() : null, p_ferme: d.fer ? new Date(d.fer).toISOString() : null, p_tentatives: d.tent || 1 });
     if (!r.ok) return toast('Enregistrement impossible (' + (r.raison || 'erreur') + ').');
     S.sub = null; toast('Évaluation enregistrée. Activez-la pour que les affermis puissent la passer.'); main();
   };
+}
+
+const loc = i => { if (!i) return ''; const d = new Date(i); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
+const fm = i => new Date(i).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' });
+const closedD = e => e.actif && e.ferme_a && new Date(e.ferme_a) <= new Date();
+const etat = e => e.ouverte ? ['Ouverte', 'actif'] : closedD(e) ? ['Fermée (date passée)', 'warn']
+  : e.actif && e.ouvre_a && new Date(e.ouvre_a) > new Date() ? ['Programmée', ''] : ['Désactivée', ''];
+const plan = e => ` Tentatives : ${e.tentatives_max}.` + (e.ouvre_a ? ` S’ouvre le ${fm(e.ouvre_a)}.` : '') + (e.ferme_a ? ` Se ferme le ${fm(e.ferme_a)}.` : '');
+function vReopen(v) {
+  const e = L.evaluations.find(x => x.id === S.sub.id);
+  v.innerHTML = `<h1>Rouvrir « ${esc(e.titre)} »</h1><div class="card"><p class="mut">La date de fermeture prévue est passée. Choisissez une nouvelle date de fermeture, sinon l’évaluation se refermerait aussitôt.</p>
+  <label>Nouvelle date de fermeture<input id="nd" type="datetime-local"></label>
+  <div class="acts"><button class="btn" id="ok">Rouvrir jusqu’à cette date</button><button class="btn sec" id="sd">Rouvrir sans date de fermeture</button><button class="btn sec" id="cn">Annuler</button></div></div>`;
+  const go = async sans => {
+    const val = $('#nd').value;
+    if (!sans && (!val || new Date(val) <= new Date())) return toast('Choisissez une date de fermeture dans le futur.');
+    const r = await rpc('eval_enc_activer', { p_id: e.id, p_actif: true, p_ferme: sans ? null : new Date(val).toISOString(), p_sans_date: sans });
+    if (!r.ok) return toast('Impossible de rouvrir l’évaluation.');
+    S.sub = null; toast('Évaluation rouverte.'); main();
+  };
+  $('#ok').onclick = () => go(false); $('#sd').onclick = () => go(true); $('#cn').onclick = () => { S.sub = null; main(); };
 }
 
 /* ---------- Correction ---------- */
