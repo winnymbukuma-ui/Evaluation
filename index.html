@@ -14,9 +14,18 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script src="common.js"></script>
 <script>
-let code = null, data = null, ex = null, msg = '';
+let code = null, data = null, ex = null, msg = '', decal = 0, cdT = null;
 const app = $('#app');
 const show = h => { app.innerHTML = h; scrollTo(0, 0); };
+const fmt = i => new Date(i).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' });
+function cd() {   // comptes à rebours « s'ouvre dans … »
+  document.querySelectorAll('.cd').forEach(x => {
+    const l = new Date(x.dataset.t).getTime() - (Date.now() + decal);
+    if (l <= 0) { clearInterval(cdT); back(); return; }
+    const h = Math.floor(l / 3600000), m = Math.floor(l / 60000) % 60, s = Math.floor(l / 1000) % 60;
+    x.textContent = (h ? h + ' h ' : '') + m + ' min ' + String(s).padStart(2, '0') + ' s';
+  });
+}
 
 const hist = s => {
   if (!history.state) history.replaceState(s, '');
@@ -60,21 +69,26 @@ async function login() {
 }
 function list(p) {
   if (!p) hist({ v: 'list' });
-  const d = data;
+  const d = data; decal = new Date(d.maintenant).getTime() - Date.now();
   show(`<section class="narrow"><div class="row"><h1>Bonjour ${esc(d.prenom)}</h1><button class="btn sec sm" id="out">Quitter</button></div>
   <p class="mut">${esc(d.session || '')}</p>` +
   (d.evaluations.length ? d.evaluations.map(e => {
-    let r;
+    let r = '';
     if (e.etat !== 'aucune') r = e.publie
       ? (e.mention ? `<div>${badge(e.mention)}${e.commentaire ? `<p class="cm">« ${esc(e.commentaire)} »</p>` : ''}</div>` : '<span class="mut">Pas de mention pour le moment.</span>')
       : '<span class="mut">Terminé. Le résultat n’est pas encore publié.</span>';
-    else r = `<button class="btn" data-id="${e.id}">Commencer</button>`;
-    return `<article class="card"><h2>${esc(e.titre)}</h2>${meta(e.type, e.duree, e.nb_questions)}${r}</article>`;
+    const peut = e.acces === 'ouvert' && e.tentatives_faites < e.tentatives_max;
+    if (peut) r += `<div><button class="btn" data-id="${e.id}">${e.etat === 'aucune' ? 'Commencer' : 'Nouvelle tentative'}</button></div>`;
+    else if (e.etat === 'aucune') r = e.acces === 'pas_ouverte'
+      ? `<span class="mut">S’ouvre le ${fmt(e.ouvre_a)}, dans <b class="cd" data-t="${e.ouvre_a}"></b>.</span>` : '<span class="mut">Fermée.</span>';
+    const inf = (e.tentatives_max > 1 ? ` ${e.tentatives_faites} tentative(s) utilisée(s) sur ${e.tentatives_max}.` : '') + (e.acces === 'ouvert' && e.ferme_a ? ` Ferme le ${fmt(e.ferme_a)}.` : '');
+    return `<article class="card"><h2>${esc(e.titre)}</h2>${meta(e.type, e.duree, e.nb_questions)}${inf ? `<p class="mut">${inf.trim()}</p>` : ''}${r}</article>`;
   }).join('') : '<p class="card mut">Aucune évaluation disponible pour le moment.</p>') +
   `<button class="btn sec" id="rf">Actualiser</button></section>`);
   $('#out').onclick = () => { code = null; home(); };
   $('#rf').onclick = back;
   app.querySelectorAll('[data-id]').forEach(b => b.onclick = () => warn(b.dataset.id));
+  clearInterval(cdT); cd(); cdT = setInterval(cd, 1000);
 }
 async function back() {
   const r = await rpc('eval_aff_connexion', { p_code: code });
@@ -85,7 +99,7 @@ function warn(id, p) {
   const e = data.evaluations.find(x => x.id === id);
   show(`<section class="card narrow"><h1>${esc(e.titre)}</h1><ul class="rules">
   <li>Durée : <b>${e.duree} minutes</b>. Le chronomètre démarre dès que vous commencez.</li>
-  <li><b>Une seule tentative.</b></li>
+  <li>Tentatives autorisées : <b>${e.tentatives_max}</b>${e.tentatives_max > 1 ? ` (déjà utilisées : ${e.tentatives_faites})` : ''}.</li>
   <li>Si vous quittez cette page, l’examen est <b>terminé</b>. Un seul retour rapide est toléré, avec un avertissement.</li>
   <li>Vos réponses s’enregistrent automatiquement.</li></ul>
   <label class="chk"><input type="checkbox" id="ok"> J’ai compris et je suis prêt(e)</label>
